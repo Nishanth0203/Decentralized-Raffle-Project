@@ -1,0 +1,5 @@
+1. get our sub id for chainlink vrf and fund
+2. deploy our contract using the subscriptionId
+3. register the contract with chainlink vrf and its sub id
+4. register the contract with chainlink keepers
+5. run staging tests
