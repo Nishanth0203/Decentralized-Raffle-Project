@@ -1,28 +1,69 @@
-const { network } = require("hardhat")
+const { network, ethers } = require("hardhat")
+const {
+    networkConfig,
+    developmentChains,
+    VERIFICATION_BLOCK_CONFIRMATIONS,
+} = require("../helper-hardhat-config")
+const { verify } = require("../utils/verify")
 
-const BASE_FEE = "250000000000000000" // 0.25 is this the premium in LINK?
-const GAS_PRICE_LINK = 1e9 // link per gas, is this the gas lane? // 0.000000001 LINK per gas
+const FUND_AMOUNT = ethers.utils.parseEther("1") // 1 Ether, or 1e18 (10^18) Wei
 
 module.exports = async ({ getNamedAccounts, deployments }) => {
     const { deploy, log } = deployments
     const { deployer } = await getNamedAccounts()
     const chainId = network.config.chainId
-    // If we are on a local development network, we need to deploy mocks!
-    if (chainId == 31337) {
-        log("Local network detected! Deploying mocks...")
-        await deploy("VRFCoordinatorV2Mock", {
-            from: deployer,
-            log: true,
-            args: [BASE_FEE, GAS_PRICE_LINK],
-        })
+    let vrfCoordinatorV2Address, subscriptionId, vrfCoordinatorV2Mock
 
-        log("Mocks Deployed!")
-        log("----------------------------------------------------------")
-        log("You are deploying to a local network, you'll need a local network running to interact")
-        log(
-            "Please run `yarn hardhat console --network localhost` to interact with the deployed smart contracts!"
-        )
-        log("----------------------------------------------------------")
+    if (chainId == 31337) {
+        // create VRFV2 Subscription
+        vrfCoordinatorV2Mock = await ethers.getContract("VRFCoordinatorV2Mock")
+        vrfCoordinatorV2Address = vrfCoordinatorV2Mock.address
+        const transactionResponse = await vrfCoordinatorV2Mock.createSubscription()
+        const transactionReceipt = await transactionResponse.wait()
+        subscriptionId = transactionReceipt.events[0].args.subId
+        // Fund the subscription
+        // Our mock makes it so we don't actually have to worry about sending fund
+        await vrfCoordinatorV2Mock.fundSubscription(subscriptionId, FUND_AMOUNT)
+    } else {
+        vrfCoordinatorV2Address = networkConfig[chainId]["vrfCoordinatorV2"]
+        subscriptionId = networkConfig[chainId]["subscriptionId"]
     }
+    const waitBlockConfirmations = developmentChains.includes(network.name)
+        ? 1
+        : VERIFICATION_BLOCK_CONFIRMATIONS
+
+    log("----------------------------------------------------")
+    const arguments = [
+        vrfCoordinatorV2Address,
+        subscriptionId,
+        networkConfig[chainId]["gasLane"],
+        networkConfig[chainId]["keepersUpdateInterval"],
+        networkConfig[chainId]["raffleEntranceFee"],
+        networkConfig[chainId]["callbackGasLimit"],
+    ]
+    const raffle = await deploy("Raffle", {
+        from: deployer,
+        args: arguments,
+        log: true,
+        waitConfirmations: waitBlockConfirmations,
+    })
+
+    // Ensure the Raffle contract is a valid consumer of the VRFCoordinatorV2Mock contract.
+    if (developmentChains.includes(network.name)) {
+        const vrfCoordinatorV2Mock = await ethers.getContract("VRFCoordinatorV2Mock")
+        await vrfCoordinatorV2Mock.addConsumer(subscriptionId, raffle.address)
+    }
+
+    // Verify the deployment
+    if (!developmentChains.includes(network.name) && process.env.ETHERSCAN_API_KEY) {
+        log("Verifying...")
+        await verify(raffle.address, arguments)
+    }
+
+    log("Enter lottery with command:")
+    const networkName = network.name == "hardhat" ? "localhost" : network.name
+    log(`yarn hardhat run scripts/enterRaffle.js --network ${networkName}`)
+    log("----------------------------------------------------")
 }
-module.exports.tags = ["all", "mocks"]
+
+module.exports.tags = ["all", "raffle"]
